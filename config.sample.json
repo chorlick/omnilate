@@ -1,0 +1,7 @@
+{
+  "translate": true,
+  "target_language": "thai with isan dialect",
+  "api_key": "sk-xxx",
+  "provider": "ollama",
+  "ollama_model": "gemma:7b"
+}
