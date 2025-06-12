@@ -2,6 +2,8 @@
 
 **PySub** is a command-line utility that transcribes audio from video files and optionally translates the text into another language using either [OpenAI](https://platform.openai.com/) or [Ollama](https://ollama.com/) as the language model provider. Subtitles are exported in `.srt` format and are fully timestamped.
 
+![Image](https://github.com/user-attachments/assets/deead36e-4be1-47a4-badf-8735264d24e9)
+
 ---
 
 ## ✨ Features
