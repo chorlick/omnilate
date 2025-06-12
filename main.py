@@ -8,6 +8,7 @@ import openai
 import jsonschema
 import logging
 import os
+from pydub import AudioSegment
 from moviepy import VideoFileClip
 from openai import OpenAI
 
@@ -19,7 +20,13 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
 logger = logging.getLogger(__name__)
+
+def split_audio(input_path, chunk_ms=60000):
+    audio = AudioSegment.from_file(input_path)
+    chunks = [audio[i:i + chunk_ms] for i in range(0, len(audio), chunk_ms)]
+    return chunks
 
 def translate_text(text, target_language, api_key=None, provider="openai", ollama_model="llama3"):
     if provider == "openai":
@@ -34,8 +41,19 @@ def translate_with_openai(text, target_language, api_key):
     response = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": f"You are a helpful assistant that translates English to {target_language}."},
-            {"role": "user", "content": f"Translate this:\n{text}"}
+            {
+            "role": "system",
+            "content": (
+                "You are a professional translation engine. "
+                "Translate the following English sentence into **{target_language}** only. Do not use any other language except the one provide. "
+                "You must translate from english to **{target_language}**. Do not confuse one language with another. Check and verify your work after you are done"
+                "Respond with ONLY the Thai sentence, no extra commentary."
+            )
+            },
+            {
+            "role": "user",
+            "content": f"{text}"
+            }
         ]
     )
     return response.choices[0].message.content.strip()        
@@ -118,8 +136,15 @@ def write_srt(transcription_result, output_path, translate=False, language="thai
     srt_data = srt.compose(subtitles)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(srt_data)
+
+
 def main():
     import argparse
+    import os
+    from pydub import AudioSegment
+    import datetime
+    import srt
+    import whisper
 
     parser = argparse.ArgumentParser(description="Generate subtitles from a video.")
     parser.add_argument("video_path", help="Path to input video file")
@@ -131,40 +156,86 @@ def main():
     config = {}
     if args.config:
         config = load_config(args.config)
-        provider = config.get("provider", "openai")
-        ollama_model = config.get("ollama_model", "llama3")
 
+    translate = config.get("translate", False)
+    target_language = config.get("target_language", "thai")
+    api_key = config.get("api_key", None)
+    provider = config.get("provider", "openai")
+    ollama_model = config.get("ollama_model", "llama3")
+    chunk_duration_sec = config.get("chunk_duration_sec", 60)
+    chunk_overlap_sec = config.get("chunk_overlap_sec", 5)
 
     video_path = args.video_path
     srt_path = args.srt_output_path
-    translate = config.get("translate", False)
-    target_language = config.get("target_language", "thai")
+    audio_path = "temp_audio.mp3"
 
     logger.info("Extracting audio...")
-    audio_path = extract_audio(video_path)
+    extract_audio(video_path, audio_path)
 
-    logger.info("Transcribing...")
-    transcription_result = transcribe(audio_path)
+    logger.info("Splitting audio into overlapping chunks...")
+    chunk_len = chunk_duration_sec * 1000
+    overlap = chunk_overlap_sec * 1000
+    audio = AudioSegment.from_file(audio_path)
 
-    os.remove(audio_path)
+    chunks = []
+    for i in range(0, len(audio), chunk_len - overlap):
+        chunks.append(audio[i:i + chunk_len])
 
-    api_key = config.get("api_key")
+    srt_index = 1
+    cumulative_offset = 0.0
+    last_english = None
 
+    logger.info(f"Processing {len(chunks)} chunks...")
 
-    logger.info("Writing SRT...")
+    with open(srt_path, "w", encoding="utf-8") as srt_file:
+        for i, chunk in enumerate(chunks):
+            chunk_file = f"chunk_{i}.mp3"
+            chunk.export(chunk_file, format="mp3")
+            logger.info(f"→ Chunk {i + 1}/{len(chunks)}: Transcribing...")
 
-    write_srt(
-        transcription_result,
-        srt_path,
-        translate=translate,
-        language=target_language,
-        api_key=api_key,
-        provider=provider,
-        ollama_model=ollama_model
-    )
+            try:
+                model = whisper.load_model("base")
+                result = model.transcribe(chunk_file, language="en")
+            except Exception as e:
+                logger.error(f"Failed to transcribe chunk {i + 1}: {e}")
+                continue
 
+            for segment in result["segments"]:
+                english = segment["text"].strip()
+                if english == last_english:
+                    continue
+                last_english = english
 
-    logger.info(f"Subtitles saved to {srt_path}")
+                start = datetime.timedelta(seconds=cumulative_offset + segment["start"])
+                end = datetime.timedelta(seconds=cumulative_offset + segment["end"])
 
+                if translate:
+                    try:
+                        translation = translate_text(
+                            english, target_language, api_key, provider, ollama_model
+                        )
+                        logger.info(f"[Chunk {i + 1}] EN: {english} → {target_language.upper()}: {translation}")
+                        content = translation
+                    except Exception as e:
+                        content = "[Translation error]"
+                        logger.error(f"[Chunk {i + 1}] Error translating: {english} — {e}")
+                else:
+                    content = english
+                    logger.info(f"[Chunk {i + 1}] EN: {english}")
+
+                subtitle = srt.Subtitle(index=srt_index, start=start, end=end, content=content)
+                srt_file.write(srt.compose([subtitle]))
+                srt_index += 1
+
+            cumulative_offset += (chunk_len - overlap) / 1000.0
+
+            try:
+                os.remove(chunk_file)
+            except OSError:
+                logger.warning(f"Could not delete temporary chunk file: {chunk_file}")
+
+    logger.info(f"✅ Subtitles saved to: {srt_path}")
+
+    
 if __name__ == "__main__":
     main()
