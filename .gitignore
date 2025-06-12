@@ -195,5 +195,5 @@ cython_debug/
 *.log
 *.srt
 *.mp4
-*.mpa3
+*.mp3
 config.json
